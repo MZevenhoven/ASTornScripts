@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Attack Buttons
 // @namespace    http://tampermonkey.net/
-// @version      6.2
+// @version      6.3
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/page.php?sid=attack*
 // @description  none
@@ -51,12 +51,41 @@
 
     const REMOVE_SELECTOR_STRING = REMOVE_SELECTORS.join(', ');
     const HIDE_SELECTOR_STRING = [...REMOVE_SELECTORS, ...CHAT_SELECTORS].join(', ');
+
     let audioCtx = null;
+
+    function debounce(fn, delay = 50) {
+        let timer = null;
+        return function (...args) {
+            clearTimeout(timer);
+            timer = setTimeout(() => fn.apply(this, args), delay);
+        };
+    }
 
     function setStyles(el, styles, important = false) {
         if (!el) return;
         for (const [prop, value] of Object.entries(styles)) {
             el.style.setProperty(prop, value, important ? 'important' : '');
+        }
+    }
+
+    function removeStoredListener(target, eventName, handler, options) {
+        if (target && handler) {
+            target.removeEventListener(eventName, handler, options);
+        }
+    }
+
+    function disconnectObserver(target, key) {
+        if (target?.[key]) {
+            target[key].disconnect();
+            target[key] = null;
+        }
+    }
+
+    function clearStoredInterval(target, key) {
+        if (target?.[key]) {
+            clearInterval(target[key]);
+            target[key] = null;
         }
     }
 
@@ -192,9 +221,11 @@
         const startObserver = () => {
             if (!document.body) return;
 
+            const debouncedSyncAttackIframeUi = debounce(syncAttackIframeUi, 25);
+
             syncAttackIframeUi();
 
-            new MutationObserver(syncAttackIframeUi).observe(document.body, {
+            new MutationObserver(debouncedSyncAttackIframeUi).observe(document.body, {
                 childList: true,
                 subtree: true
             });
@@ -226,7 +257,7 @@
     };
 
     function markOverlayReady(overlay, ready) {
-        if (!overlay) return;
+        if (!overlay || overlay._disposed) return;
 
         if (ready) {
             if (!overlay.dataset.readyShown) {
@@ -241,10 +272,8 @@
     }
 
     function stopOverlayTimer(overlay) {
-        if (!overlay?._timerInterval) return;
-        clearInterval(overlay._timerInterval);
-        overlay._timerInterval = null;
-        overlay._timerStarted = false;
+        clearStoredInterval(overlay, '_timerInterval');
+        if (overlay) overlay._timerStarted = false;
     }
 
     function disposeOverlay(overlay) {
@@ -262,51 +291,24 @@
         }
 
         stopOverlayTimer(overlay);
+        disconnectObserver(overlay, '_rowObserver');
+        disconnectObserver(overlay, '_iframeButtonObserver');
 
-        if (overlay._rowObserver) {
-            overlay._rowObserver.disconnect();
-            overlay._rowObserver = null;
-        }
+        removeStoredListener(frame, 'load', overlay._frameLoadHandler);
+        removeStoredListener(frame, 'load', overlay._frameResizeLoadHandler);
+        removeStoredListener(overlay, 'mousedown', overlay._overlayMouseDownHandler);
+        removeStoredListener(close, 'click', overlay._closeClickHandler);
+        removeStoredListener(header, 'mousedown', overlay._headerMouseDownHandler);
+        removeStoredListener(document, 'mousemove', overlay._documentMouseMoveHandler);
+        removeStoredListener(document, 'mouseup', overlay._documentMouseUpHandler);
 
-        if (overlay._iframeButtonObserver) {
-            overlay._iframeButtonObserver.disconnect();
-            overlay._iframeButtonObserver = null;
-        }
-
-        if (frame && overlay._frameLoadHandler) {
-            frame.removeEventListener('load', overlay._frameLoadHandler);
-            overlay._frameLoadHandler = null;
-        }
-
-        if (frame && overlay._frameResizeLoadHandler) {
-            frame.removeEventListener('load', overlay._frameResizeLoadHandler);
-            overlay._frameResizeLoadHandler = null;
-        }
-
-        if (overlay._overlayMouseDownHandler) {
-            overlay.removeEventListener('mousedown', overlay._overlayMouseDownHandler);
-            overlay._overlayMouseDownHandler = null;
-        }
-
-        if (close && overlay._closeClickHandler) {
-            close.removeEventListener('click', overlay._closeClickHandler);
-            overlay._closeClickHandler = null;
-        }
-
-        if (header && overlay._headerMouseDownHandler) {
-            header.removeEventListener('mousedown', overlay._headerMouseDownHandler);
-            overlay._headerMouseDownHandler = null;
-        }
-
-        if (overlay._documentMouseMoveHandler) {
-            document.removeEventListener('mousemove', overlay._documentMouseMoveHandler);
-            overlay._documentMouseMoveHandler = null;
-        }
-
-        if (overlay._documentMouseUpHandler) {
-            document.removeEventListener('mouseup', overlay._documentMouseUpHandler);
-            overlay._documentMouseUpHandler = null;
-        }
+        overlay._frameLoadHandler = null;
+        overlay._frameResizeLoadHandler = null;
+        overlay._overlayMouseDownHandler = null;
+        overlay._closeClickHandler = null;
+        overlay._headerMouseDownHandler = null;
+        overlay._documentMouseMoveHandler = null;
+        overlay._documentMouseUpHandler = null;
 
         if (overlay._rafId !== null && overlay._rafId !== undefined) {
             cancelAnimationFrame(overlay._rafId);
@@ -325,19 +327,19 @@
     }
 
     function clearAllOverlays() {
-        overlays.forEach((overlay) => disposeOverlay(overlay));
+        overlays.forEach(disposeOverlay);
     }
 
-    const bringToFront = (overlay) => {
+    function bringToFront(overlay) {
         highestZ += 1;
         overlay.style.zIndex = String(highestZ);
-    };
+    }
 
     function resizeOverlayToIframe(overlay, frame) {
         if (!overlay || !frame || overlay._disposed) return;
 
         try {
-            const doc = frame.contentDocument || frame.contentWindow.document;
+            const doc = frame.contentDocument || frame.contentWindow?.document;
             if (!doc?.body || !doc?.documentElement) return;
 
             const { body, documentElement: html } = doc;
@@ -411,7 +413,7 @@
         if (!overlay || overlay._disposed) return;
 
         try {
-            const frame = overlay._frame || overlay.querySelector('iframe');
+            const frame = overlay._frame;
             const doc = frame?.contentDocument || frame?.contentWindow?.document;
             if (!doc) return;
 
@@ -419,7 +421,6 @@
             if (!button) return;
 
             const wasDisabled = button.disabled;
-
             button.disabled = disabled;
 
             if (disabled) {
@@ -450,9 +451,7 @@
     function watchSourceRowForOverlay(overlay, row) {
         if (!overlay || !row || !document.body || overlay._disposed) return;
 
-        if (overlay._rowObserver) {
-            overlay._rowObserver.disconnect();
-        }
+        disconnectObserver(overlay, '_rowObserver');
 
         const observer = new MutationObserver(() => {
             if (overlay._disposed || !document.body.contains(overlay)) {
@@ -479,7 +478,7 @@
     }
 
     function monitorIframeAttackButton(overlay, row) {
-        const frame = overlay._frame || overlay.querySelector('iframe');
+        const frame = overlay._frame;
         if (!frame) return;
 
         const onLoad = () => {
@@ -495,12 +494,10 @@
             }
 
             try {
-                const doc = frame.contentDocument || frame.contentWindow.document;
+                const doc = frame.contentDocument || frame.contentWindow?.document;
                 if (!doc?.body) return;
 
-                if (overlay._iframeButtonObserver) {
-                    overlay._iframeButtonObserver.disconnect();
-                }
+                disconnectObserver(overlay, '_iframeButtonObserver');
 
                 const iframeObserver = new MutationObserver(() => {
                     if (overlay._disposed) {
@@ -532,7 +529,6 @@
         const startX = 70 + overlays.size * 18;
         const startY = 70 + overlays.size * 18;
 
-        overlay._sourceRow = sourceRow || null;
         overlay._rowObserver = null;
         overlay._iframeButtonObserver = null;
         overlay._timerInterval = null;
@@ -554,8 +550,7 @@
             'box-shadow': '0 8px 20px rgba(0,0,0,0.5)',
             'display': 'block',
             'overflow': 'hidden',
-            'resize': 'horizontal',
-            'will-change': 'transform'
+            'resize': 'horizontal'
         });
         bringToFront(overlay);
 
@@ -628,7 +623,9 @@
             overlay._rafId = requestAnimationFrame(paint);
         };
 
-        const onOverlayMouseDown = () => bringToFront(overlay);
+        const onOverlayMouseDown = () => {
+            bringToFront(overlay);
+        };
 
         const onFrameResizeLoad = () => {
             if (overlay._disposed) return;
@@ -654,10 +651,10 @@
             dragOffsetX = e.clientX - rect.left;
             dragOffsetY = e.clientY - rect.top;
 
+            overlay.style.willChange = 'transform';
             frame.style.pointerEvents = 'none';
-            document.body.style.userSelect = '';
-
             document.body.style.userSelect = 'none';
+
             e.preventDefault();
         };
 
@@ -685,6 +682,7 @@
             overlay.style.transform = 'translate(0px, 0px)';
             overlay.style.left = `${targetX}px`;
             overlay.style.top = `${targetY}px`;
+            overlay.style.willChange = '';
 
             frame.style.pointerEvents = 'auto';
             document.body.style.userSelect = '';
@@ -784,6 +782,8 @@
     }
 
     function installLocationChangeHooks() {
+        const debouncedHandleLocationMaybeChanged = debounce(handleLocationMaybeChanged, 50);
+
         const wrapHistoryMethod = (methodName) => {
             const original = history[methodName];
             history[methodName] = function () {
@@ -797,15 +797,20 @@
         wrapHistoryMethod('replaceState');
 
         window.addEventListener('popstate', handleLocationMaybeChanged);
-        new MutationObserver(handleLocationMaybeChanged).observe(document, { subtree: true, childList: true });
+        new MutationObserver(debouncedHandleLocationMaybeChanged).observe(document, {
+            subtree: true,
+            childList: true
+        });
     }
 
     function installMarketObserver() {
         const start = () => {
+            const debouncedCreateAttackButtons = debounce(createAttackButtons, 50);
+
             createAttackButtons();
             if (!document.body) return;
 
-            new MutationObserver(createAttackButtons).observe(document.body, {
+            new MutationObserver(debouncedCreateAttackButtons).observe(document.body, {
                 childList: true,
                 subtree: true
             });
