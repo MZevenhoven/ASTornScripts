@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Attack Buttons
 // @namespace    http://tampermonkey.net/
-// @version      6.3
+// @version      6.4
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/page.php?sid=attack*
 // @description  none
@@ -51,6 +51,7 @@
 
     const REMOVE_SELECTOR_STRING = REMOVE_SELECTORS.join(', ');
     const HIDE_SELECTOR_STRING = [...REMOVE_SELECTORS, ...CHAT_SELECTORS].join(', ');
+    const SELLER_LIST_SELECTOR = '[class^="sellerListWrapper___"]';
 
     let audioCtx = null;
 
@@ -87,6 +88,14 @@
             clearInterval(target[key]);
             target[key] = null;
         }
+    }
+
+    function getSellerListWrapper() {
+        return document.querySelector(SELLER_LIST_SELECTOR);
+    }
+
+    function sellerListExists() {
+        return !!getSellerListWrapper();
     }
 
     function ensureReadyStyles() {
@@ -459,7 +468,16 @@
                 return;
             }
 
+            const tableStillExists = sellerListExists();
             const rowStillExists = document.body.contains(row);
+
+            if (!tableStillExists) {
+                observer.disconnect();
+                overlay._rowObserver = null;
+                disposeOverlay(overlay);
+                return;
+            }
+
             setIframeAttackButtonDisabled(overlay, rowStillExists);
 
             if (!rowStillExists) {
@@ -474,6 +492,12 @@
         });
 
         overlay._rowObserver = observer;
+
+        if (!sellerListExists()) {
+            disposeOverlay(overlay);
+            return;
+        }
+
         setIframeAttackButtonDisabled(overlay, true);
     }
 
@@ -484,7 +508,14 @@
         const onLoad = () => {
             if (overlay._disposed) return;
 
+            const tableStillExists = sellerListExists();
             const rowStillExists = document.body.contains(row);
+
+            if (!tableStillExists) {
+                disposeOverlay(overlay);
+                return;
+            }
+
             setIframeAttackButtonDisabled(overlay, rowStillExists);
 
             if (rowStillExists) {
@@ -502,6 +533,13 @@
                 const iframeObserver = new MutationObserver(() => {
                     if (overlay._disposed) {
                         iframeObserver.disconnect();
+                        return;
+                    }
+
+                    if (!sellerListExists()) {
+                        iframeObserver.disconnect();
+                        overlay._iframeButtonObserver = null;
+                        disposeOverlay(overlay);
                         return;
                     }
 
