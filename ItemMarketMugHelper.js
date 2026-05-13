@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Attack Buttons
 // @namespace    http://tampermonkey.net/
-// @version      6.1
+// @version      6.2
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/page.php?sid=attack*
 // @description  none
@@ -240,32 +240,92 @@
         }
     }
 
+    function stopOverlayTimer(overlay) {
+        if (!overlay?._timerInterval) return;
+        clearInterval(overlay._timerInterval);
+        overlay._timerInterval = null;
+        overlay._timerStarted = false;
+    }
+
+    function disposeOverlay(overlay) {
+        if (!overlay || overlay._disposed) return;
+        overlay._disposed = true;
+
+        const frame = overlay._frame || overlay.querySelector('iframe');
+        const header = overlay._header || null;
+        const close = overlay._closeButton || null;
+
+        const resizeTimer = resizeTimers.get(overlay);
+        if (resizeTimer) {
+            clearInterval(resizeTimer);
+            resizeTimers.delete(overlay);
+        }
+
+        stopOverlayTimer(overlay);
+
+        if (overlay._rowObserver) {
+            overlay._rowObserver.disconnect();
+            overlay._rowObserver = null;
+        }
+
+        if (overlay._iframeButtonObserver) {
+            overlay._iframeButtonObserver.disconnect();
+            overlay._iframeButtonObserver = null;
+        }
+
+        if (frame && overlay._frameLoadHandler) {
+            frame.removeEventListener('load', overlay._frameLoadHandler);
+            overlay._frameLoadHandler = null;
+        }
+
+        if (frame && overlay._frameResizeLoadHandler) {
+            frame.removeEventListener('load', overlay._frameResizeLoadHandler);
+            overlay._frameResizeLoadHandler = null;
+        }
+
+        if (overlay._overlayMouseDownHandler) {
+            overlay.removeEventListener('mousedown', overlay._overlayMouseDownHandler);
+            overlay._overlayMouseDownHandler = null;
+        }
+
+        if (close && overlay._closeClickHandler) {
+            close.removeEventListener('click', overlay._closeClickHandler);
+            overlay._closeClickHandler = null;
+        }
+
+        if (header && overlay._headerMouseDownHandler) {
+            header.removeEventListener('mousedown', overlay._headerMouseDownHandler);
+            overlay._headerMouseDownHandler = null;
+        }
+
+        if (overlay._documentMouseMoveHandler) {
+            document.removeEventListener('mousemove', overlay._documentMouseMoveHandler);
+            overlay._documentMouseMoveHandler = null;
+        }
+
+        if (overlay._documentMouseUpHandler) {
+            document.removeEventListener('mouseup', overlay._documentMouseUpHandler);
+            overlay._documentMouseUpHandler = null;
+        }
+
+        if (overlay._rafId !== null && overlay._rafId !== undefined) {
+            cancelAnimationFrame(overlay._rafId);
+            overlay._rafId = null;
+        }
+
+        if (frame) {
+            frame.style.pointerEvents = 'auto';
+            frame.src = 'about:blank';
+        }
+
+        document.body.style.userSelect = '';
+        markOverlayReady(overlay, false);
+        overlays.delete(overlay);
+        overlay.remove();
+    }
+
     function clearAllOverlays() {
-        overlays.forEach((overlay) => {
-            const frame = overlay.querySelector('iframe');
-            if (frame) frame.src = 'about:blank';
-
-            const timer = resizeTimers.get(overlay);
-            if (timer) {
-                clearInterval(timer);
-                resizeTimers.delete(overlay);
-            }
-
-            if (overlay._rowObserver) {
-                overlay._rowObserver.disconnect();
-                overlay._rowObserver = null;
-            }
-
-            if (overlay._iframeButtonObserver) {
-                overlay._iframeButtonObserver.disconnect();
-                overlay._iframeButtonObserver = null;
-            }
-
-            markOverlayReady(overlay, false);
-            overlay.remove();
-        });
-
-        overlays.clear();
+        overlays.forEach((overlay) => disposeOverlay(overlay));
     }
 
     const bringToFront = (overlay) => {
@@ -274,7 +334,7 @@
     };
 
     function resizeOverlayToIframe(overlay, frame) {
-        if (!overlay || !frame) return;
+        if (!overlay || !frame || overlay._disposed) return;
 
         try {
             const doc = frame.contentDocument || frame.contentWindow.document;
@@ -303,7 +363,7 @@
 
         let count = 0;
         const timer = setInterval(() => {
-            if (!document.body.contains(overlay)) {
+            if (overlay._disposed || !document.body.contains(overlay)) {
                 clearInterval(timer);
                 resizeTimers.delete(overlay);
                 return;
@@ -319,33 +379,39 @@
 
         resizeTimers.set(overlay, timer);
     }
+
     function startOverlayTimer(overlay) {
-        if (!overlay?._title || overlay._timerStarted) return;
+        if (!overlay?._title || overlay._timerStarted || overlay._disposed) return;
 
         overlay._timerStarted = true;
-
         let seconds = 0;
 
         const update = () => {
+            if (overlay._disposed || !overlay._title) return;
+
             const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
             const secs = String(seconds % 60).padStart(2, '0');
-
             overlay._title.textContent = `Attack ${mins}:${secs}`;
         };
 
         update();
 
         overlay._timerInterval = setInterval(() => {
+            if (overlay._disposed || !document.body.contains(overlay)) {
+                stopOverlayTimer(overlay);
+                return;
+            }
+
             seconds++;
             update();
         }, 1000);
     }
 
     function setIframeAttackButtonDisabled(overlay, disabled) {
-        if (!overlay) return;
+        if (!overlay || overlay._disposed) return;
 
         try {
-            const frame = overlay.querySelector('iframe');
+            const frame = overlay._frame || overlay.querySelector('iframe');
             const doc = frame?.contentDocument || frame?.contentWindow?.document;
             if (!doc) return;
 
@@ -370,6 +436,7 @@
                 button.style.cursor = '';
                 button.style.pointerEvents = '';
                 button.title = '';
+
                 if (wasDisabled) {
                     markOverlayReady(overlay, true);
                     startOverlayTimer(overlay);
@@ -381,15 +448,14 @@
     }
 
     function watchSourceRowForOverlay(overlay, row) {
-        if (!overlay || !row || !document.body) return;
+        if (!overlay || !row || !document.body || overlay._disposed) return;
 
         if (overlay._rowObserver) {
             overlay._rowObserver.disconnect();
         }
 
         const observer = new MutationObserver(() => {
-            const overlayStillExists = document.body.contains(overlay);
-            if (!overlayStillExists) {
+            if (overlay._disposed || !document.body.contains(overlay)) {
                 observer.disconnect();
                 return;
             }
@@ -413,10 +479,12 @@
     }
 
     function monitorIframeAttackButton(overlay, row) {
-        const frame = overlay.querySelector('iframe');
+        const frame = overlay._frame || overlay.querySelector('iframe');
         if (!frame) return;
 
-        frame.addEventListener('load', () => {
+        const onLoad = () => {
+            if (overlay._disposed) return;
+
             const rowStillExists = document.body.contains(row);
             setIframeAttackButtonDisabled(overlay, rowStillExists);
 
@@ -435,6 +503,11 @@
                 }
 
                 const iframeObserver = new MutationObserver(() => {
+                    if (overlay._disposed) {
+                        iframeObserver.disconnect();
+                        return;
+                    }
+
                     const sourceRowStillExists = document.body.contains(row);
                     setIframeAttackButtonDisabled(overlay, sourceRowStillExists);
                 });
@@ -448,7 +521,10 @@
             } catch (err) {
                 console.log('[AttackButtons] Could not observe iframe button:', err);
             }
-        });
+        };
+
+        overlay._frameLoadHandler = onLoad;
+        frame.addEventListener('load', onLoad);
     }
 
     function createOverlay(url, sourceRow) {
@@ -459,6 +535,10 @@
         overlay._sourceRow = sourceRow || null;
         overlay._rowObserver = null;
         overlay._iframeButtonObserver = null;
+        overlay._timerInterval = null;
+        overlay._timerStarted = false;
+        overlay._disposed = false;
+        overlay._rafId = null;
 
         setStyles(overlay, {
             'position': 'fixed',
@@ -525,6 +605,10 @@
         frame.loading = 'eager';
         frame.src = url;
 
+        overlay._header = header;
+        overlay._closeButton = close;
+        overlay._frame = frame;
+
         let isDragging = false;
         let dragOffsetX = 0;
         let dragOffsetY = 0;
@@ -532,54 +616,33 @@
         let baseY = startY;
         let targetX = startX;
         let targetY = startY;
-        let rafId = null;
 
         const paint = () => {
-            rafId = null;
+            overlay._rafId = null;
+            if (overlay._disposed) return;
             overlay.style.transform = `translate(${targetX - baseX}px, ${targetY - baseY}px)`;
         };
 
         const queuePaint = () => {
-            if (rafId !== null) return;
-            rafId = requestAnimationFrame(paint);
+            if (overlay._disposed || overlay._rafId !== null) return;
+            overlay._rafId = requestAnimationFrame(paint);
         };
 
-        overlay.addEventListener('mousedown', () => bringToFront(overlay));
+        const onOverlayMouseDown = () => bringToFront(overlay);
 
-        frame.addEventListener('load', () => {
+        const onFrameResizeLoad = () => {
+            if (overlay._disposed) return;
             resizeOverlayToIframe(overlay, frame);
             scheduleResizeChecks(overlay, frame);
-        });
+        };
 
-        close.addEventListener('click', () => {
-            const timer = resizeTimers.get(overlay);
-            if (timer) {
-                clearInterval(timer);
-                resizeTimers.delete(overlay);
-            }
+        const onCloseClick = () => {
+            disposeOverlay(overlay);
+        };
 
-            if (overlay._rowObserver) {
-                overlay._rowObserver.disconnect();
-                overlay._rowObserver = null;
-            }
+        const onHeaderMouseDown = (e) => {
+            if (overlay._disposed) return;
 
-            if (overlay._iframeButtonObserver) {
-                overlay._iframeButtonObserver.disconnect();
-                overlay._iframeButtonObserver = null;
-            }
-
-            if (rafId !== null) {
-                cancelAnimationFrame(rafId);
-                rafId = null;
-            }
-
-            markOverlayReady(overlay, false);
-            frame.src = 'about:blank';
-            overlays.delete(overlay);
-            overlay.remove();
-        });
-
-        header.addEventListener('mousedown', (e) => {
             bringToFront(overlay);
             isDragging = true;
 
@@ -592,13 +655,14 @@
             dragOffsetY = e.clientY - rect.top;
 
             frame.style.pointerEvents = 'none';
-            document.body.style.userSelect = 'none';
+            document.body.style.userSelect = '';
 
+            document.body.style.userSelect = 'none';
             e.preventDefault();
-        });
+        };
 
         const onMouseMove = (e) => {
-            if (!isDragging) return;
+            if (!isDragging || overlay._disposed) return;
 
             const maxLeft = window.innerWidth - overlay.offsetWidth;
             const maxTop = window.innerHeight - overlay.offsetHeight;
@@ -610,12 +674,12 @@
         };
 
         const onMouseUp = () => {
-            if (!isDragging) return;
+            if (!isDragging || overlay._disposed) return;
             isDragging = false;
 
-            if (rafId !== null) {
-                cancelAnimationFrame(rafId);
-                rafId = null;
+            if (overlay._rafId !== null) {
+                cancelAnimationFrame(overlay._rafId);
+                overlay._rafId = null;
             }
 
             overlay.style.transform = 'translate(0px, 0px)';
@@ -626,6 +690,17 @@
             document.body.style.userSelect = '';
         };
 
+        overlay._overlayMouseDownHandler = onOverlayMouseDown;
+        overlay._frameResizeLoadHandler = onFrameResizeLoad;
+        overlay._closeClickHandler = onCloseClick;
+        overlay._headerMouseDownHandler = onHeaderMouseDown;
+        overlay._documentMouseMoveHandler = onMouseMove;
+        overlay._documentMouseUpHandler = onMouseUp;
+
+        overlay.addEventListener('mousedown', onOverlayMouseDown);
+        frame.addEventListener('load', onFrameResizeLoad);
+        close.addEventListener('click', onCloseClick);
+        header.addEventListener('mousedown', onHeaderMouseDown);
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
 
