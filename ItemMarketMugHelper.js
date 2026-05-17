@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Attack Buttons
 // @namespace    http://tampermonkey.net/
-// @version      6.4
+// @version      6.6
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/page.php?sid=attack*
 // @description  none
@@ -51,9 +51,6 @@
 
     const REMOVE_SELECTOR_STRING = REMOVE_SELECTORS.join(', ');
     const HIDE_SELECTOR_STRING = [...REMOVE_SELECTORS, ...CHAT_SELECTORS].join(', ');
-    const SELLER_LIST_SELECTOR = '[class^="sellerListWrapper___"]';
-
-    let audioCtx = null;
 
     function debounce(fn, delay = 50) {
         let timer = null;
@@ -73,92 +70,6 @@
     function removeStoredListener(target, eventName, handler, options) {
         if (target && handler) {
             target.removeEventListener(eventName, handler, options);
-        }
-    }
-
-    function disconnectObserver(target, key) {
-        if (target?.[key]) {
-            target[key].disconnect();
-            target[key] = null;
-        }
-    }
-
-    function clearStoredInterval(target, key) {
-        if (target?.[key]) {
-            clearInterval(target[key]);
-            target[key] = null;
-        }
-    }
-
-    function getSellerListWrapper() {
-        return document.querySelector(SELLER_LIST_SELECTOR);
-    }
-
-    function sellerListExists() {
-        return !!getSellerListWrapper();
-    }
-
-    function ensureReadyStyles() {
-        if (document.getElementById('attack-overlay-ready-styles')) return;
-
-        const style = document.createElement('style');
-        style.id = 'attack-overlay-ready-styles';
-        style.textContent = `
-            @keyframes attack-ready-pulse {
-                0% {
-                    box-shadow: 0 0 0 0 rgba(57, 255, 120, 0.85), 0 8px 20px rgba(0,0,0,0.5);
-                }
-                70% {
-                    box-shadow: 0 0 0 8px rgba(57, 255, 120, 0), 0 8px 20px rgba(0,0,0,0.5);
-                }
-                100% {
-                    box-shadow: 0 0 0 0 rgba(57, 255, 120, 0), 0 8px 20px rgba(0,0,0,0.5);
-                }
-            }
-
-            .attack-overlay-ready {
-                border-color: #39ff78 !important;
-                animation: attack-ready-pulse 1s infinite;
-            }
-        `;
-        document.head.appendChild(style);
-    }
-
-    function getAudioContext() {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        if (!Ctx) return null;
-        if (!audioCtx) audioCtx = new Ctx();
-        return audioCtx;
-    }
-
-    function playReadyBeep() {
-        try {
-            const ctx = getAudioContext();
-            if (!ctx) return;
-
-            if (ctx.state === 'suspended') {
-                ctx.resume().catch(() => {});
-            }
-
-            const now = ctx.currentTime;
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(880, now);
-            osc.frequency.exponentialRampToValueAtTime(1320, now + 0.12);
-
-            gain.gain.setValueAtTime(0.0001, now);
-            gain.gain.exponentialRampToValueAtTime(0.08, now + 0.01);
-            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
-
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-
-            osc.start(now);
-            osc.stop(now + 0.2);
-        } catch (err) {
-            console.log('[AttackButtons] Could not play ready beep:', err);
         }
     }
 
@@ -251,8 +162,6 @@
 
     if (!isMarketPage) return;
 
-    ensureReadyStyles();
-
     const overlays = new Set();
     const resizeTimers = new WeakMap();
     let highestZ = 999999;
@@ -264,26 +173,6 @@
         const url = new URL(location.href);
         return url.searchParams.get('sid') === 'ItemMarket' && url.searchParams.has('itemID');
     };
-
-    function markOverlayReady(overlay, ready) {
-        if (!overlay || overlay._disposed) return;
-
-        if (ready) {
-            if (!overlay.dataset.readyShown) {
-                overlay.dataset.readyShown = 'true';
-                playReadyBeep();
-            }
-            overlay.classList.add('attack-overlay-ready');
-        } else {
-            delete overlay.dataset.readyShown;
-            overlay.classList.remove('attack-overlay-ready');
-        }
-    }
-
-    function stopOverlayTimer(overlay) {
-        clearStoredInterval(overlay, '_timerInterval');
-        if (overlay) overlay._timerStarted = false;
-    }
 
     function disposeOverlay(overlay) {
         if (!overlay || overlay._disposed) return;
@@ -299,11 +188,6 @@
             resizeTimers.delete(overlay);
         }
 
-        stopOverlayTimer(overlay);
-        disconnectObserver(overlay, '_rowObserver');
-        disconnectObserver(overlay, '_iframeButtonObserver');
-
-        removeStoredListener(frame, 'load', overlay._frameLoadHandler);
         removeStoredListener(frame, 'load', overlay._frameResizeLoadHandler);
         removeStoredListener(overlay, 'mousedown', overlay._overlayMouseDownHandler);
         removeStoredListener(close, 'click', overlay._closeClickHandler);
@@ -311,7 +195,6 @@
         removeStoredListener(document, 'mousemove', overlay._documentMouseMoveHandler);
         removeStoredListener(document, 'mouseup', overlay._documentMouseUpHandler);
 
-        overlay._frameLoadHandler = null;
         overlay._frameResizeLoadHandler = null;
         overlay._overlayMouseDownHandler = null;
         overlay._closeClickHandler = null;
@@ -330,7 +213,6 @@
         }
 
         document.body.style.userSelect = '';
-        markOverlayReady(overlay, false);
         overlays.delete(overlay);
         overlay.remove();
     }
@@ -391,186 +273,11 @@
         resizeTimers.set(overlay, timer);
     }
 
-    function startOverlayTimer(overlay) {
-        if (!overlay?._title || overlay._timerStarted || overlay._disposed) return;
-
-        overlay._timerStarted = true;
-        let seconds = 0;
-
-        const update = () => {
-            if (overlay._disposed || !overlay._title) return;
-
-            const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
-            const secs = String(seconds % 60).padStart(2, '0');
-            overlay._title.textContent = `Attack ${mins}:${secs}`;
-        };
-
-        update();
-
-        overlay._timerInterval = setInterval(() => {
-            if (overlay._disposed || !document.body.contains(overlay)) {
-                stopOverlayTimer(overlay);
-                return;
-            }
-
-            seconds++;
-            update();
-        }, 1000);
-    }
-
-    function setIframeAttackButtonDisabled(overlay, disabled) {
-        if (!overlay || overlay._disposed) return;
-
-        try {
-            const frame = overlay._frame;
-            const doc = frame?.contentDocument || frame?.contentWindow?.document;
-            if (!doc) return;
-
-            const button = doc.querySelector('[class^="dialogButtons___"] > button');
-            if (!button) return;
-
-            const wasDisabled = button.disabled;
-            button.disabled = disabled;
-
-            if (disabled) {
-                button.setAttribute('aria-disabled', 'true');
-                button.style.opacity = '0.5';
-                button.style.cursor = 'not-allowed';
-                button.style.pointerEvents = 'none';
-                button.title = 'Wait until the market row is gone.';
-                markOverlayReady(overlay, false);
-            } else {
-                button.disabled = false;
-                button.removeAttribute('aria-disabled');
-                button.style.opacity = '';
-                button.style.cursor = '';
-                button.style.pointerEvents = '';
-                button.title = '';
-
-                if (wasDisabled) {
-                    markOverlayReady(overlay, true);
-                    startOverlayTimer(overlay);
-                }
-            }
-        } catch (err) {
-            console.log('[AttackButtons] Could not set iframe attack button state:', err);
-        }
-    }
-
-    function watchSourceRowForOverlay(overlay, row) {
-        if (!overlay || !row || !document.body || overlay._disposed) return;
-
-        disconnectObserver(overlay, '_rowObserver');
-
-        const observer = new MutationObserver(() => {
-            if (overlay._disposed || !document.body.contains(overlay)) {
-                observer.disconnect();
-                return;
-            }
-
-            const tableStillExists = sellerListExists();
-            const rowStillExists = document.body.contains(row);
-
-            if (!tableStillExists) {
-                observer.disconnect();
-                overlay._rowObserver = null;
-                disposeOverlay(overlay);
-                return;
-            }
-
-            setIframeAttackButtonDisabled(overlay, rowStillExists);
-
-            if (!rowStillExists) {
-                observer.disconnect();
-                overlay._rowObserver = null;
-            }
-        });
-
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-
-        overlay._rowObserver = observer;
-
-        if (!sellerListExists()) {
-            disposeOverlay(overlay);
-            return;
-        }
-
-        setIframeAttackButtonDisabled(overlay, true);
-    }
-
-    function monitorIframeAttackButton(overlay, row) {
-        const frame = overlay._frame;
-        if (!frame) return;
-
-        const onLoad = () => {
-            if (overlay._disposed) return;
-
-            const tableStillExists = sellerListExists();
-            const rowStillExists = document.body.contains(row);
-
-            if (!tableStillExists) {
-                disposeOverlay(overlay);
-                return;
-            }
-
-            setIframeAttackButtonDisabled(overlay, rowStillExists);
-
-            if (rowStillExists) {
-                watchSourceRowForOverlay(overlay, row);
-            } else {
-                markOverlayReady(overlay, true);
-            }
-
-            try {
-                const doc = frame.contentDocument || frame.contentWindow?.document;
-                if (!doc?.body) return;
-
-                disconnectObserver(overlay, '_iframeButtonObserver');
-
-                const iframeObserver = new MutationObserver(() => {
-                    if (overlay._disposed) {
-                        iframeObserver.disconnect();
-                        return;
-                    }
-
-                    if (!sellerListExists()) {
-                        iframeObserver.disconnect();
-                        overlay._iframeButtonObserver = null;
-                        disposeOverlay(overlay);
-                        return;
-                    }
-
-                    const sourceRowStillExists = document.body.contains(row);
-                    setIframeAttackButtonDisabled(overlay, sourceRowStillExists);
-                });
-
-                iframeObserver.observe(doc.body, {
-                    childList: true,
-                    subtree: true
-                });
-
-                overlay._iframeButtonObserver = iframeObserver;
-            } catch (err) {
-                console.log('[AttackButtons] Could not observe iframe button:', err);
-            }
-        };
-
-        overlay._frameLoadHandler = onLoad;
-        frame.addEventListener('load', onLoad);
-    }
-
-    function createOverlay(url, sourceRow) {
+    function createOverlay(url) {
         const overlay = document.createElement('div');
         const startX = 70 + overlays.size * 18;
         const startY = 70 + overlays.size * 18;
 
-        overlay._rowObserver = null;
-        overlay._iframeButtonObserver = null;
-        overlay._timerInterval = null;
-        overlay._timerStarted = false;
         overlay._disposed = false;
         overlay._rafId = null;
 
@@ -608,8 +315,7 @@
         });
 
         const title = document.createElement('span');
-        title.textContent = 'Attack 00:00';
-        overlay._title = title;
+        title.textContent = 'Attack';
 
         const close = document.createElement('button');
         close.textContent = '✕';
@@ -744,10 +450,6 @@
         overlay.append(header, frame);
         document.body.appendChild(overlay);
         overlays.add(overlay);
-
-        if (sourceRow) {
-            monitorIframeAttackButton(overlay, sourceRow);
-        }
     }
 
     function createAttackButtons() {
@@ -826,7 +528,7 @@
             const original = history[methodName];
             history[methodName] = function () {
                 const result = original.apply(this, arguments);
-                handleLocationMaybeChanged();
+                debouncedHandleLocationMaybeChanged();
                 return result;
             };
         };
@@ -834,11 +536,7 @@
         wrapHistoryMethod('pushState');
         wrapHistoryMethod('replaceState');
 
-        window.addEventListener('popstate', handleLocationMaybeChanged);
-        new MutationObserver(debouncedHandleLocationMaybeChanged).observe(document, {
-            subtree: true,
-            childList: true
-        });
+        window.addEventListener('popstate', debouncedHandleLocationMaybeChanged);
     }
 
     function installMarketObserver() {
@@ -866,16 +564,7 @@
         if (!button) return;
 
         e.preventDefault();
-
-        const row = button.closest('li[class*="rowWrapper"]');
-        if (!row) return;
-
-        const ctx = getAudioContext();
-        if (ctx && ctx.state === 'suspended') {
-            ctx.resume().catch(() => {});
-        }
-
-        createOverlay(button.dataset.attackUrl, row);
+        createOverlay(button.dataset.attackUrl);
     });
 
     installLocationChangeHooks();
