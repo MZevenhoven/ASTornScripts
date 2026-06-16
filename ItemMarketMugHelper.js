@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Attack Buttons
 // @namespace    http://tampermonkey.net/
-// @version      6.8
+// @version      6.9
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/page.php?sid=attack*
 // @description  none
@@ -121,7 +121,36 @@
     let highestZ = 999999;
     let previousUrl = location.href;
 
-    const getCurrentItemId = () => new URL(location.href).searchParams.get('itemID');
+    // Shared drag state — only one overlay can be dragged at a time
+    let dragState = null;
+
+    document.addEventListener('mousemove', (e) => {
+        if (!dragState) return;
+        const { overlay, offsetX, offsetY } = dragState;
+        if (overlay._disposed) { dragState = null; return; }
+        dragState.targetX = Math.max(0, Math.min(e.clientX - offsetX, window.innerWidth - overlay.offsetWidth));
+        dragState.targetY = Math.max(0, Math.min(e.clientY - offsetY, window.innerHeight - overlay.offsetHeight));
+        if (dragState.rafId === null)
+            dragState.rafId = requestAnimationFrame(() => {
+                dragState.rafId = null;
+                if (dragState) overlay.style.transform = `translate(${dragState.targetX - dragState.baseX}px, ${dragState.targetY - dragState.baseY}px)`;
+            });
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!dragState) return;
+        const { overlay } = dragState;
+        if (dragState.rafId !== null) { cancelAnimationFrame(dragState.rafId); dragState.rafId = null; }
+        if (!overlay._disposed) {
+            overlay.style.transform = 'translate(0px, 0px)';
+            overlay.style.left = `${dragState.targetX}px`;
+            overlay.style.top = `${dragState.targetY}px`;
+            overlay.style.willChange = '';
+            overlay._frame.style.pointerEvents = 'auto';
+        }
+        document.body.style.userSelect = '';
+        dragState = null;
+    });
 
     function disposeOverlay(overlay) {
         if (!overlay || overlay._disposed) return;
@@ -129,20 +158,14 @@
 
         const { _frame: frame, _header: header, _closeButton: close } = overlay;
 
-        clearInterval(resizeTimers.get(overlay));
+        resizeTimers.get(overlay)?.disconnect();
         resizeTimers.delete(overlay);
 
         frame?.removeEventListener('load', overlay._frameResizeLoadHandler);
         overlay.removeEventListener('mousedown', overlay._overlayMouseDownHandler);
         close?.removeEventListener('click', overlay._closeClickHandler);
         header?.removeEventListener('mousedown', overlay._headerMouseDownHandler);
-        document.removeEventListener('mousemove', overlay._documentMouseMoveHandler);
-        document.removeEventListener('mouseup', overlay._documentMouseUpHandler);
-
-        if (overlay._rafId !== null) {
-            cancelAnimationFrame(overlay._rafId);
-            overlay._rafId = null;
-        }
+        if (dragState?.overlay === overlay) dragState = null;
 
         if (frame) {
             frame.style.pointerEvents = 'auto';
@@ -173,21 +196,20 @@
     }
 
     function scheduleResizeChecks(overlay, frame) {
-        clearInterval(resizeTimers.get(overlay));
-        let count = 0;
-        const timer = setInterval(() => {
-            if (overlay._disposed || !document.body.contains(overlay)) {
-                clearInterval(timer);
-                resizeTimers.delete(overlay);
-                return;
-            }
-            resizeOverlayToIframe(overlay, frame);
-            if (++count >= 20) {
-                clearInterval(timer);
-                resizeTimers.delete(overlay);
-            }
-        }, 300);
-        resizeTimers.set(overlay, timer);
+        resizeTimers.get(overlay)?.disconnect();
+        resizeTimers.delete(overlay);
+        try {
+            const doc = frame.contentDocument || frame.contentWindow?.document;
+            if (!doc?.body) return;
+            const ro = new ResizeObserver(() => {
+                if (overlay._disposed) { ro.disconnect(); resizeTimers.delete(overlay); return; }
+                resizeOverlayToIframe(overlay, frame);
+            });
+            ro.observe(doc.body);
+            resizeTimers.set(overlay, ro);
+        } catch {
+            // cross-origin fallback: single resize attempt on load is sufficient
+        }
     }
 
     function createOverlay(url) {
@@ -197,7 +219,6 @@
 
         const overlay = document.createElement('div');
         overlay._disposed = false;
-        overlay._rafId = null;
 
         setStyles(overlay, {
             'position': 'fixed', 'left': `${startX}px`, 'top': `${startY}px`,
@@ -239,63 +260,36 @@
         overlay._closeButton = close;
         overlay._frame = frame;
 
-        let isDragging = false;
-        let dragOffsetX = 0, dragOffsetY = 0;
-        let baseX = startX, baseY = startY;
-        let targetX = startX, targetY = startY;
-
-        const paint = () => {
-            overlay._rafId = null;
-            if (!overlay._disposed) overlay.style.transform = `translate(${targetX - baseX}px, ${targetY - baseY}px)`;
-        };
-        const queuePaint = () => {
-            if (!overlay._disposed && overlay._rafId === null)
-                overlay._rafId = requestAnimationFrame(paint);
-        };
-
-        overlay._overlayMouseDownHandler = () => bringToFront(overlay);
-        overlay._frameResizeLoadHandler = () => {
+        const onOverlayMouseDown = () => bringToFront(overlay);
+        const onFrameLoad = () => {
             if (!overlay._disposed) { resizeOverlayToIframe(overlay, frame); scheduleResizeChecks(overlay, frame); }
         };
-        overlay._closeClickHandler = () => disposeOverlay(overlay);
-        overlay._headerMouseDownHandler = (e) => {
+        const onCloseClick = () => disposeOverlay(overlay);
+        const onHeaderMouseDown = (e) => {
             if (overlay._disposed) return;
             bringToFront(overlay);
-            isDragging = true;
             const rect = overlay.getBoundingClientRect();
-            baseX = targetX = rect.left;
-            baseY = targetY = rect.top;
-            dragOffsetX = e.clientX - rect.left;
-            dragOffsetY = e.clientY - rect.top;
+            dragState = {
+                overlay, offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top,
+                baseX: rect.left, baseY: rect.top,
+                targetX: rect.left, targetY: rect.top,
+                rafId: null
+            };
             overlay.style.willChange = 'transform';
             frame.style.pointerEvents = 'none';
             document.body.style.userSelect = 'none';
             e.preventDefault();
         };
-        overlay._documentMouseMoveHandler = (e) => {
-            if (!isDragging || overlay._disposed) return;
-            targetX = Math.max(0, Math.min(e.clientX - dragOffsetX, window.innerWidth - overlay.offsetWidth));
-            targetY = Math.max(0, Math.min(e.clientY - dragOffsetY, window.innerHeight - overlay.offsetHeight));
-            queuePaint();
-        };
-        overlay._documentMouseUpHandler = () => {
-            if (!isDragging || overlay._disposed) return;
-            isDragging = false;
-            if (overlay._rafId !== null) { cancelAnimationFrame(overlay._rafId); overlay._rafId = null; }
-            overlay.style.transform = 'translate(0px, 0px)';
-            overlay.style.left = `${targetX}px`;
-            overlay.style.top = `${targetY}px`;
-            overlay.style.willChange = '';
-            frame.style.pointerEvents = 'auto';
-            document.body.style.userSelect = '';
-        };
 
-        overlay.addEventListener('mousedown', overlay._overlayMouseDownHandler);
-        frame.addEventListener('load', overlay._frameResizeLoadHandler);
-        close.addEventListener('click', overlay._closeClickHandler);
-        header.addEventListener('mousedown', overlay._headerMouseDownHandler);
-        document.addEventListener('mousemove', overlay._documentMouseMoveHandler);
-        document.addEventListener('mouseup', overlay._documentMouseUpHandler);
+        overlay._overlayMouseDownHandler = onOverlayMouseDown;
+        overlay._frameResizeLoadHandler = onFrameLoad;
+        overlay._closeClickHandler = onCloseClick;
+        overlay._headerMouseDownHandler = onHeaderMouseDown;
+
+        overlay.addEventListener('mousedown', onOverlayMouseDown);
+        frame.addEventListener('load', onFrameLoad);
+        close.addEventListener('click', onCloseClick);
+        header.addEventListener('mousedown', onHeaderMouseDown);
 
         header.append(title, close);
         overlay.append(header, frame);
@@ -382,4 +376,12 @@
     }
 
     document.addEventListener('click', (e) => {
-        const button = e.target.closest('a[data-attack-
+        const button = e.target.closest('a[data-attack-url]');
+        if (!button) return;
+        e.preventDefault();
+        createOverlay(button.dataset.attackUrl);
+    });
+
+    installLocationChangeHooks();
+    installMarketObserver();
+})();                                                                  
