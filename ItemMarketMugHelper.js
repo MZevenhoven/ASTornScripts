@@ -384,4 +384,4 @@
 
     installLocationChangeHooks();
     installMarketObserver();
-})();                                                                  
+})();
