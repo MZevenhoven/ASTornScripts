@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Attack Buttons
 // @namespace    http://tampermonkey.net/
-// @version      6.7
+// @version      6.8
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/page.php?sid=attack*
 // @description  none
@@ -367,7 +367,12 @@
         const start = () => {
             if (!document.body) return;
             createAttackButtons();
-            new MutationObserver(debounce(createAttackButtons, 50)).observe(document.body, { childList: true, subtree: true });
+            const marketList = document.querySelector('[class*="sellerList"]');
+            const observeTarget = marketList ?? document.body;
+            new MutationObserver(debounce(createAttackButtons, 50)).observe(observeTarget, {
+                childList: true,
+                subtree: !marketList
+            });
         };
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', start, { once: true });
@@ -377,12 +382,4 @@
     }
 
     document.addEventListener('click', (e) => {
-        const button = e.target.closest('a[data-attack-url]');
-        if (!button) return;
-        e.preventDefault();
-        createOverlay(button.dataset.attackUrl);
-    });
-
-    installLocationChangeHooks();
-    installMarketObserver();
-})();
+        const button = e.target.closest('a[data-attack-
