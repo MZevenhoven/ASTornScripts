@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name         Torn Market Attack Buttons
 // @namespace    http://tampermonkey.net/
-// @version      6.9
+// @version      7.0
 // @match        https://www.torn.com/page.php?sid=ItemMarket*
 // @match        https://www.torn.com/page.php?sid=attack*
 // @description  none
-// @grant        none
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_openInTab
 // @run-at       document-start
 // ==/UserScript==
 (function () {
@@ -14,6 +18,29 @@
     const isAttackPage = location.href.includes('sid=attack');
     const isMarketPage = location.href.includes('sid=ItemMarket');
     const isInIframe = (() => { try { return window.self !== window.top; } catch { return true; } })();
+
+    // ─── Attack mode settings ───────────────────────────────────────────────────
+    const ATTACK_MODES = [
+        { value: 'overlay',      label: 'Floating window',     desc: 'Opens on top of the market page' },
+        { value: 'new-tab',      label: 'New tab',             desc: 'Switches to the new tab' },
+        { value: 'new-tab-bg',   label: 'New tab (stay here)', desc: 'Opens quietly in the background' },
+        { value: 'current-tab',  label: 'This tab',            desc: 'Leaves the market page' },
+    ];
+
+    let menuIds = [];
+    function registerMenuCommands() {
+        menuIds.forEach(id => GM_unregisterMenuCommand(id));
+        menuIds = [];
+        const current = GM_getValue('attackMode', 'overlay');
+        ATTACK_MODES.forEach(({ value, label }) => {
+            const id = GM_registerMenuCommand(
+                `${current === value ? '✓' : '　'} Open attack as: ${label}`,
+                () => { GM_setValue('attackMode', value); registerMenuCommands(); }
+            );
+            menuIds.push(id);
+        });
+    }
+    registerMenuCommands();
 
     const REMOVE_SELECTORS = [
         '[class^="logStatsWrap___"]',
@@ -348,40 +375,4 @@
 
     function installLocationChangeHooks() {
         const onChange = debounce(handleLocationMaybeChanged, 50);
-        const wrap = (method) => {
-            const orig = history[method];
-            history[method] = function () { const r = orig.apply(this, arguments); onChange(); return r; };
-        };
-        wrap('pushState');
-        wrap('replaceState');
-        window.addEventListener('popstate', onChange);
-    }
-
-    function installMarketObserver() {
-        const start = () => {
-            if (!document.body) return;
-            createAttackButtons();
-            const marketList = document.querySelector('[class*="sellerList"]');
-            const observeTarget = marketList ?? document.body;
-            new MutationObserver(debounce(createAttackButtons, 50)).observe(observeTarget, {
-                childList: true,
-                subtree: !marketList
-            });
-        };
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', start, { once: true });
-        } else {
-            start();
-        }
-    }
-
-    document.addEventListener('click', (e) => {
-        const button = e.target.closest('a[data-attack-url]');
-        if (!button) return;
-        e.preventDefault();
-        createOverlay(button.dataset.attackUrl);
-    });
-
-    installLocationChangeHooks();
-    installMarketObserver();
-})();
+   
