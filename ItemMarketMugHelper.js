@@ -375,4 +375,45 @@
 
     function installLocationChangeHooks() {
         const onChange = debounce(handleLocationMaybeChanged, 50);
-   
+        const wrap = (method) => {
+            const orig = history[method];
+            history[method] = function () { const r = orig.apply(this, arguments); onChange(); return r; };
+        };
+        wrap('pushState');
+        wrap('replaceState');
+        window.addEventListener('popstate', onChange);
+    }
+
+    function installMarketObserver() {
+        const start = () => {
+            if (!document.body) return;
+            createAttackButtons();
+            const marketList = document.querySelector('[class*="sellerList"]');
+            const observeTarget = marketList ?? document.body;
+            new MutationObserver(debounce(createAttackButtons, 50)).observe(observeTarget, {
+                childList: true,
+                subtree: !marketList
+            });
+        };
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', start, { once: true });
+        } else {
+            start();
+        }
+    }
+
+    document.addEventListener('click', (e) => {
+        const button = e.target.closest('a[data-attack-url]');
+        if (!button) return;
+        e.preventDefault();
+        const url = button.dataset.attackUrl;
+        const mode = GM_getValue('attackMode', 'overlay');
+        if (mode === 'overlay')     createOverlay(url);
+        else if (mode === 'new-tab')     GM_openInTab(url, { active: true });
+        else if (mode === 'new-tab-bg')  GM_openInTab(url, { active: false });
+        else                             location.href = url;
+    });
+
+    installLocationChangeHooks();
+    installMarketObserver();
+})();
